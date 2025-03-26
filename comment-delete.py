@@ -64,13 +64,17 @@ def main():
     auth = HTTPBasicAuth(wp_admin_user, wp_admin_pass)
     page = 1
     total_deleted = 0
-    threads = 10  # You can adjust this for performance
+    threads = 5  # You can adjust this for performance
 
     while True:
-        comments = fetch_comments_for_page(wp_site_url, auth, page=page, per_page=100, verbose=True)
-        if not comments:
+        comments = fetch_comments_for_page(wp_site_url, auth, page=page, per_page=5, verbose=True)
+        if not comments and page == 1:
             print(f"No more pending comments to delete on page {page}.")
             break
+        elif not comments:
+            print(f"setting to page 1 and trying again!")
+            page = 1
+            continue
 
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = [
