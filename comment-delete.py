@@ -3,53 +3,89 @@ import requests
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from tqdm import tqdm
 
-def fetch_comments_for_page(base_url, auth, page=1, per_page=100, verbose=False):
-    endpoint = f"{base_url.rstrip('/')}/wp-json/wp/v2/comments"
-    params = {
-        "page": page,
-        "per_page": per_page,
-        "status": "hold",   # 'hold' = pending comments
-        "context": "edit",  # 'edit' context required to see unpublished comments
-    }
+class WordPressAPI:
+    def __init__(self, base_url, auth):
+        self.base_url = base_url.rstrip('/')
+        self.auth = auth
+        self.session = self._create_session()
 
-    if verbose:
-        print(f"Fetching page {page} ...")
+    def _create_session(self):
+        session = requests.Session()
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        # Configure connection pooling
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=100,
+            pool_maxsize=100
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        session.auth = self.auth
+        return session
 
-    response = requests.get(endpoint, params=params, auth=auth)
+    def fetch_comments(self, page=1, per_page=100):
+        endpoint = f"{self.base_url}/wp-json/wp/v2/comments"
+        params = {
+            "page": page,
+            "per_page": per_page,
+            "status": "hold",
+            "context": "edit",
+        }
 
-    if response.status_code != 200:
-        print(f"Error fetching comments (HTTP {response.status_code}): {response.text}")
-        return []
+        try:
+            response = self.session.get(endpoint, params=params, timeout=120)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            print(f"Error fetching comments: {e}")
+            return []
 
-    data = response.json()
-    if not data and verbose:
-        print("No comments found on this page.")
+    def delete_comment(self, comment_id, force=False):
+        endpoint = f"{self.base_url}/wp-json/wp/v2/comments/{comment_id}"
+        params = {"force": "true" if force else "false"}
 
-    return data
+        try:
+            response = self.session.delete(endpoint, params=params, timeout=60)
+            return comment_id, response
+        except requests.RequestException as e:
+            print(f"Error deleting comment {comment_id}: {e}")
+            return comment_id, None
 
-def delete_comment(base_url, comment_id, auth, force=False):
-    endpoint = f"{base_url.rstrip('/')}/wp-json/wp/v2/comments/{comment_id}"
-    params = {"force": "true" if force else "false"}
-    response = requests.delete(endpoint, params=params, auth=auth)
-    return comment_id, response
+def calculate_optimal_thread_count(total_items):
+    """Calculate optimal thread count based on system resources and workload"""
+    cpu_count = os.cpu_count() or 4
+    # Use more threads for I/O bound operations, but cap it reasonably
+    return min(max(cpu_count * 4, 10), min(total_items, 50))
 
-def process_deletion(comment, base_url, auth, force):
-    comment_id = comment.get("id")
-    author_name = comment.get("author_name", "Unknown")
-    print(f"  Deleting comment ID {comment_id} by '{author_name}' ...")
+def process_batch(api, comments, progress_bar=None):
+    """Process a batch of comments"""
+    results = {'success': 0, 'failed': 0}
 
-    comment_id, response = delete_comment(base_url, comment_id, auth, force)
-    if response.status_code == 200:
-        print(f"    -> Successfully deleted (moved to Trash) comment ID: {comment_id}")
-        return True
-    elif response.status_code == 410:
-        print(f"    -> Comment ID {comment_id} was already deleted.")
-        return True
-    else:
-        print(f"    -> Failed to delete comment ID {comment_id}, status={response.status_code}")
-        print(response.text)
-        return False
+    for comment in comments:
+        comment_id = comment.get("id")
+        author_name = comment.get("author_name", "Unknown")
+
+        _, response = api.delete_comment(comment_id, force=False)
+
+        if response and response.status_code in (200, 410):
+            results['success'] += 1
+        else:
+            results['failed'] += 1
+
+        if progress_bar:
+            progress_bar.update(1)
+
+    return results
 
 def main():
     load_dotenv()
@@ -58,37 +94,58 @@ def main():
     wp_admin_pass = os.getenv("WP_ADMIN_PASS")
 
     if not wp_site_url or not wp_admin_user or not wp_admin_pass:
-        print("Missing environment variables. Check your .env file.")
+        print("Missing environment variables. Please ensure WP_SITE_URL, WP_ADMIN_USER, and WP_ADMIN_PASS are set in your .env file.")
         return
 
     auth = HTTPBasicAuth(wp_admin_user, wp_admin_pass)
+    api = WordPressAPI(wp_site_url, auth)
+
     page = 1
-    total_deleted = 0
-    threads = 5  # You can adjust this for performance
+    batch_size = 100
+    total_success = 0
+    total_failed = 0
+
+    print("Starting comment deletion process...")
 
     while True:
-        comments = fetch_comments_for_page(wp_site_url, auth, page=page, per_page=100, verbose=True)
-        if not comments and page == 1:
-            print(f"No more pending comments to delete on page {page}.")
-            break
-        elif not comments:
-            print(f"setting to page 1 and trying again!")
+        comments = api.fetch_comments(page=page, per_page=batch_size)
+
+        if not comments:
+            if page == 1:
+                print("No pending comments found.")
+                break
             page = 1
+            time.sleep(2)  # Add small delay before retrying
             continue
 
-        with ThreadPoolExecutor(max_workers=threads) as executor:
-            futures = [
-                executor.submit(process_deletion, c, wp_site_url, auth, False)
-                for c in comments
-            ]
+        total_comments = len(comments)
+        thread_count = calculate_optimal_thread_count(total_comments)
+        chunks = [comments[i:i + thread_count] for i in range(0, len(comments), thread_count)]
 
-            for future in as_completed(futures):
-                if future.result():
-                    total_deleted += 1
+        with tqdm(total=total_comments, desc=f"Processing page {page}") as progress_bar:
+            with ThreadPoolExecutor(max_workers=thread_count) as executor:
+                futures = [
+                    executor.submit(process_batch, api, chunk, progress_bar)
+                    for chunk in chunks
+                ]
+
+                for future in as_completed(futures):
+                    try:
+                        results = future.result()
+                        total_success += results['success']
+                        total_failed += results['failed']
+                    except Exception as e:
+                        print(f"Batch processing error: {e}")
+                        total_failed += len(chunk)
 
         page += 1
 
-    print(f"\nTotal comments deleted: {total_deleted}")
+    print("\nDeletion Process Complete")
+    print(f"Total comments successfully processed: {total_success}")
+    print(f"Total failed deletions: {total_failed}")
+
+    if total_failed > 0:
+        print("\nSome deletions failed. You may want to run the script again to retry failed items.")
 
 if __name__ == "__main__":
     main()
