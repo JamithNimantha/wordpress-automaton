@@ -52,6 +52,14 @@ Run the script:
 python comment-delete.py
 ```
 
+### Progress Tracking
+```
+Processing page 1: 100%|██████████| 100/100 [01:10<00:00,  1.41it/s]
+Processing page 2: 100%|██████████| 100/100 [01:07<00:00,  1.48it/s]
+Processing page 3: 100%|██████████| 100/100 [01:35<00:00,  1.05it/s]
+Processing page 4:  43%|████▎     | 43/100 [00:29<00:42,  1.35it/s]
+```
+
 The script will:
 1. Connect to your WordPress site
 2. Fetch pending comments in batches
