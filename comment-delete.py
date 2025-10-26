@@ -75,7 +75,7 @@ def process_batch(api, comments, progress_bar=None):
         comment_id = comment.get("id")
         author_name = comment.get("author_name", "Unknown")
 
-        _, response = api.delete_comment(comment_id, force=False)
+        _, response = api.delete_comment(comment_id, force=True)
 
         if response and response.status_code in (200, 410):
             results['success'] += 1
