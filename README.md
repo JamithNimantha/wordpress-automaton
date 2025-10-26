@@ -2,6 +2,8 @@
 
 A high-performance Python script for bulk deletion of pending comments in WordPress sites using the WordPress REST API.
 
+Read - https://github.com/JamithNimantha/wordpress-automaton
+
 ## Features
 
 - **Parallel Processing**: Efficiently deletes comments using multi-threading
