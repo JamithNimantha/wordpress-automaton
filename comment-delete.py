@@ -67,7 +67,7 @@ def main():
     threads = 5  # You can adjust this for performance
 
     while True:
-        comments = fetch_comments_for_page(wp_site_url, auth, page=page, per_page=5, verbose=True)
+        comments = fetch_comments_for_page(wp_site_url, auth, page=page, per_page=100, verbose=True)
         if not comments and page == 1:
             print(f"No more pending comments to delete on page {page}.")
             break
